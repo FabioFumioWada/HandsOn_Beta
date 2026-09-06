@@ -44,7 +44,7 @@ except ImportError as exc:  # pragma: no cover - mensagem operacional
     ) from exc
 
 
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.0.1"
 DEFAULT_OUTPUT_DIR = "/Volumes/handson_beta/landing_zone/arquivos/"
 DEFAULT_IBGE_PAGE_URL = (
     "https://www.ibge.gov.br/estatisticas/sociais/populacao/"
@@ -710,6 +710,64 @@ class Downloader:
         return path
 
 
+def is_interactive_kernel() -> bool:
+    """Detecta o launcher interativo que injeta argumentos técnicos.
+
+    O Databricks pode iniciar o processo por ``db_ipykernel_launcher.py`` e
+    acrescentar ``-f <connection.json>`` ao ``sys.argv``. Essa detecção é usada
+    somente para remover esse argumento técnico; o parser continua estrito em
+    execução normal por terminal, Job ou CI/CD.
+    """
+
+    launcher = Path(sys.argv[0]).name.lower() if sys.argv else ""
+    return (
+        "ipykernel" in launcher
+        or "ipykernel" in sys.modules
+        or bool(os.getenv("DATABRICKS_NOTEBOOK_ID"))
+    )
+
+
+def sanitize_interactive_args(
+    argv: Sequence[str], *, interactive: bool | None = None
+) -> list[str]:
+    """Remove somente argumentos conhecidos do launcher interativo.
+
+    Não usa ``parse_known_args`` de propósito: argumentos desconhecidos devem
+    continuar gerando erro. Apenas ``-f/--connection-file`` e seu valor são
+    removidos quando a execução aparenta vir do kernel interativo.
+    """
+
+    if interactive is None:
+        interactive = is_interactive_kernel()
+    if not interactive:
+        return list(argv)
+
+    sanitized: list[str] = []
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument in {"-f", "--connection-file"}:
+            # O valor seguinte é o caminho do arquivo de conexão do kernel.
+            index += 2 if index + 1 < len(argv) else 1
+            continue
+        if argument.startswith("--connection-file="):
+            index += 1
+            continue
+        sanitized.append(argument)
+        index += 1
+    return sanitized
+
+
+def parse_args(
+    argv: Sequence[str] | None = None, *, interactive: bool | None = None
+) -> argparse.Namespace:
+    """Lê argumentos de terminal ou do launcher interativo do Databricks."""
+
+    raw_args = sys.argv[1:] if argv is None else argv
+    cleaned_args = sanitize_interactive_args(raw_args, interactive=interactive)
+    return build_parser().parse_args(cleaned_args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Descobre e baixa arquivos públicos de ANEEL, ONS, IBGE e CCEE."
@@ -796,7 +854,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = parse_args(argv)
     if args.tentativas < 1:
         raise SystemExit("--tentativas deve ser maior ou igual a 1")
     if args.intervalo_segundos < 0 or args.jitter_segundos < 0:

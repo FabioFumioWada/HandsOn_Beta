@@ -1,9 +1,9 @@
 # Ingestão de arquivos públicos para a landing zone
 
 **Projeto:** HandsOn Beta  
-**Responsável pelo artefato:** Fábio Fumio Wada  
+**Responsável pelo artefato:** Fabio Fumio Wada  
 **Script:** [`scripts/baixar_arquivos_portais.py`](../scripts/baixar_arquivos_portais.py)  
-**Versão:** 1.0.0  
+**Versão:** 1.0.1  
 **Data de referência das fontes:** 06/09/2026
 
 ## Objetivo
@@ -56,6 +56,8 @@ Se o arquivo local existir e a assinatura remota não tiver mudado, o download �
 ## Execução no Databricks
 
 Em um Databricks Repo, execute o script a partir de uma célula `%sh`, ajustando o caminho do workspace:
+
+O script trata automaticamente o argumento técnico `-f <connection.json>` que pode ser injetado pelo `db_ipykernel_launcher.py` em execuções interativas. Essa exceção é aplicada somente ao contexto reconhecido como kernel interativo; em execução normal no terminal, CI/CD ou Job, argumentos desconhecidos continuam sendo rejeitados para evitar configurações silenciosamente ignoradas.
 
 ```bash
 %sh
