@@ -38,15 +38,70 @@ class CatalogPlan:
     volumes: tuple[dict[str, Any], ...]
 
 
-def default_config_path() -> str:
-    """Localiza o manifesto relativo ao script ou usa o diretório atual."""
+def script_file_path() -> Path | None:
+    """Retorna o caminho do arquivo Python quando o runtime o disponibiliza."""
 
     script_path = globals().get("__file__")
-    if script_path:
-        repository_config = Path(script_path).resolve().parents[1] / "config" / "catalogs.json"
-        if repository_config.exists():
-            return str(repository_config)
-    return "config/catalogs.json"
+    if not script_path:
+        return None
+    try:
+        return Path(script_path).expanduser().resolve()
+    except OSError:
+        return Path(script_path).expanduser()
+
+
+def manifest_candidates(config_path: str | None = None) -> list[Path]:
+    """Gera caminhos candidatos sem depender do diretório de trabalho."""
+
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add_candidate(candidate: str | Path | None) -> None:
+        if not candidate:
+            return
+        path = Path(candidate).expanduser()
+        key = str(path)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+            key = str(path)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(path)
+
+    # Um caminho explícito ou a variável de ambiente têm prioridade.
+    add_candidate(config_path or os.getenv("CATALOG_MANIFEST_PATH"))
+
+    current_script = script_file_path()
+    if current_script:
+        # Layout do repositório: scripts/databricks_catalogs.py e config/catalogs.json.
+        add_candidate(current_script.parent.parent / "config" / "catalogs.json")
+        # Permite executar o arquivo quando o script foi copiado para uma pasta isolada,
+        # desde que o manifesto tenha sido colocado junto dele.
+        add_candidate(current_script.parent / "config" / "catalogs.json")
+        add_candidate(current_script.parent / "catalogs.json")
+
+    # Fallback para execução local a partir da raiz do repositório ou do Workspace.
+    add_candidate(Path.cwd() / "config" / "catalogs.json")
+    add_candidate(Path.cwd() / "catalogs.json")
+    return candidates
+
+
+def resolve_manifest_path(config_path: str | None = None) -> Path:
+    """Localiza o manifesto e produz erro acionável quando ele não foi publicado."""
+
+    candidates = manifest_candidates(config_path)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    searched = "\n".join(f"- {candidate}" for candidate in candidates)
+    raise FileNotFoundError(
+        "Manifesto não encontrado. O arquivo config/catalogs.json precisa estar "
+        "disponível junto ao repositório/script. Caminhos procurados:\n"
+        f"{searched}\n"
+        "Informe o caminho completo com --config ou defina "
+        "CATALOG_MANIFEST_PATH."
+    )
 
 
 def is_interactive_kernel() -> bool:
@@ -102,8 +157,11 @@ def parse_args(
     )
     parser.add_argument(
         "--config",
-        default=default_config_path(),
-        help="Caminho do manifesto JSON de catálogos.",
+        default=os.getenv("CATALOG_MANIFEST_PATH"),
+        help=(
+            "Caminho do manifesto JSON. Se omitido, procura no repositório do "
+            "script, no diretório atual ou em CATALOG_MANIFEST_PATH."
+        ),
     )
     parser.add_argument(
         "--environment",
@@ -457,7 +515,8 @@ def main() -> int:
 
     args = parse_args()
     try:
-        manifest = load_manifest(args.config)
+        manifest_path = resolve_manifest_path(args.config)
+        manifest = load_manifest(manifest_path)
         plan = build_plan(manifest, args.environment)
         require_destructive_confirmation(args)
         statements = build_statements(

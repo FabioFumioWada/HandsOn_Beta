@@ -59,7 +59,20 @@ runpy.run_path(
 )
 ```
 
-O arquivo precisa estar no Databricks Repo ou em um caminho acessível pelo workspace. O manifesto é localizado automaticamente na pasta `config/catalogs.json` do repositório quando o script é executado a partir de `scripts/`.
+O arquivo precisa estar no Databricks Repo ou em um caminho acessível pelo workspace. O manifesto recomendado é `config/catalogs.json`, versionado junto com o script. O executor procura automaticamente esse arquivo relativo ao próprio `scripts/databricks_catalogs.py`, ao diretório atual e à variável `CATALOG_MANIFEST_PATH`, portanto não depende do diretório de trabalho do Job.
+
+Se o Job tiver recebido somente o arquivo `.py`, publique também a pasta `config` no mesmo Repo/Workspace ou informe o caminho completo:
+
+```text
+--config /Workspace/Repos/<seu_usuario>/HandsOn_Beta/config/catalogs.json
+```
+
+Também é possível definir o caminho antes da execução:
+
+```python
+import os
+os.environ["CATALOG_MANIFEST_PATH"] = "/Workspace/Repos/<seu_usuario>/HandsOn_Beta/config/catalogs.json"
+```
 
 Se a execução ocorrer como notebook-scoped library, o Databricks recomenda `%pip` para instalar bibliotecas específicas do notebook [6]. Para este modo nativo, essa instalação não é necessária, porque o script usa Spark. Se você escolher forçar o modo externo `--execution-mode sql-connector` dentro do notebook, instale o conector na primeira célula:
 

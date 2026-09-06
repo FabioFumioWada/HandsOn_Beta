@@ -1,0 +1,74 @@
+{
+  "project": "HandsOn Beta",
+  "default_environment": "main",
+  "environments": {
+    "desenv": {
+      "catalog": "handson_beta_desenv",
+      "description": "Catálogo do ambiente de desenvolvimento e validação contínua.",
+      "schemas": [
+        {
+          "name": "default",
+          "comment": "Schema de compatibilidade para objetos auxiliares do ambiente."
+        },
+        {
+          "name": "landing_zone",
+          "comment": "Zona de chegada dos dados brutos provenientes das fontes externas."
+        },
+        {
+          "name": "bronze",
+          "comment": "Camada Bronze: dados brutos persistidos e minimamente padronizados."
+        },
+        {
+          "name": "prata",
+          "comment": "Camada Prata: dados tratados, conformados e com qualidade validada."
+        },
+        {
+          "name": "ouro",
+          "comment": "Camada Ouro: dados analíticos, features e produtos de dados para consumo."
+        }
+      ]
+    },
+    "main": {
+      "catalog": "handson_beta",
+      "description": "Catálogo principal do projeto HandsOn Beta.",
+      "schemas": [
+        {
+          "name": "default",
+          "comment": "Schema de compatibilidade para objetos auxiliares do ambiente."
+        },
+        {
+          "name": "landing_zone",
+          "comment": "Zona de chegada dos dados brutos provenientes das fontes externas."
+        },
+        {
+          "name": "bronze",
+          "comment": "Camada Bronze: dados brutos persistidos e minimamente padronizados."
+        },
+        {
+          "name": "prata",
+          "comment": "Camada Prata: dados tratados, conformados e com qualidade validada."
+        },
+        {
+          "name": "ouro",
+          "comment": "Camada Ouro: dados analíticos, features e produtos de dados para consumo."
+        }
+      ]
+    }
+  },
+  "volumes": [
+    {
+      "schema": "landing_zone",
+      "name": "arquivos",
+      "type": "managed",
+      "comment": "Arquivos de entrada recebidos na zona de aterrissagem.",
+      "enabled_by_default": false
+    },
+    {
+      "schema": "prata",
+      "name": "bronze",
+      "type": "managed",
+      "comment": "Área de apoio para arquivos intermediários associados à camada Prata.",
+      "enabled_by_default": false
+    }
+  ]
+}

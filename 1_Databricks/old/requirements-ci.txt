@@ -1,2 +1,0 @@
-# Conector oficial para execução de SQL em Databricks SQL Warehouses.
-databricks-sql-connector>=3.0.0,<5.0.0
