@@ -38,6 +38,8 @@ A escolha é deliberada: um volume externo exige uma localização de armazename
 
 O script possui dois modos de execução. Quando executado dentro de um notebook ou Python Job do Databricks, ele usa a sessão Spark nativa e **não precisa importar `databricks.sql`**. Quando executado no computador local ou no GitHub Actions, ele usa o `databricks-sql-connector` para conectar a um SQL Warehouse.
 
+Em notebooks do Databricks, o kernel pode acrescentar automaticamente `-f <connection.json>` ao `sys.argv`. O parser remove somente esse argumento técnico quando identifica um launcher interativo; em terminal, GitHub Actions ou Python script task, argumentos desconhecidos continuam sendo rejeitados normalmente.
+
 ### 4.1 Execução dentro do Databricks
 
 Há duas formas corretas de executar o arquivo. Para produção e CI/CD, configure `scripts/databricks_catalogs.py` como **Python script task** em um Lakeflow Job, usando um Git provider ou um arquivo do Workspace. O Databricks documenta Python script tasks para arquivos armazenados no Workspace, em Git provider ou em armazenamento acessível pelo workspace [7]. Nesse caso, use os parâmetros da tarefa:

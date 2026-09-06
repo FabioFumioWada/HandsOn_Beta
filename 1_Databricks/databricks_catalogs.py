@@ -49,7 +49,52 @@ def default_config_path() -> str:
     return "config/catalogs.json"
 
 
-def parse_args() -> argparse.Namespace:
+def is_interactive_kernel() -> bool:
+    """Detecta o launcher interativo que injeta argumentos do kernel.
+
+    O Databricks pode iniciar o processo por ``db_ipykernel_launcher.py`` e
+    acrescentar ``-f <connection.json>`` ao ``sys.argv``. Essa detecção é usada
+    somente para remover esse argumento técnico; o parser continua estrito em
+    execução normal por terminal, Job ou GitHub Actions.
+    """
+
+    launcher = Path(sys.argv[0]).name.lower() if sys.argv else ""
+    return (
+        "ipykernel" in launcher
+        or "ipykernel" in sys.modules
+        or bool(os.getenv("DATABRICKS_NOTEBOOK_ID"))
+    )
+
+
+def sanitize_interactive_args(
+    argv: list[str], *, interactive: bool | None = None
+) -> list[str]:
+    """Remove somente argumentos técnicos conhecidos do launcher interativo."""
+
+    if interactive is None:
+        interactive = is_interactive_kernel()
+    if not interactive:
+        return list(argv)
+
+    sanitized: list[str] = []
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument in {"-f", "--connection-file"}:
+            # O valor seguinte é o caminho do arquivo de conexão do kernel.
+            index += 2 if index + 1 < len(argv) else 1
+            continue
+        if argument.startswith("--connection-file="):
+            index += 1
+            continue
+        sanitized.append(argument)
+        index += 1
+    return sanitized
+
+
+def parse_args(
+    argv: list[str] | None = None, *, interactive: bool | None = None
+) -> argparse.Namespace:
     """Lê argumentos de linha de comando e permite uso em CI/CD ou Jobs."""
 
     parser = argparse.ArgumentParser(
@@ -100,7 +145,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Exibe os comandos SQL sem se conectar ou executá-los.",
     )
-    return parser.parse_args()
+    raw_args = sys.argv[1:] if argv is None else argv
+    cleaned_args = sanitize_interactive_args(raw_args, interactive=interactive)
+    return parser.parse_args(cleaned_args)
 
 
 def load_manifest(path: str | Path) -> dict[str, Any]:
