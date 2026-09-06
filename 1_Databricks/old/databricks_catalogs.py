@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """Provisiona a estrutura de catálogos do projeto HandsOn Beta no Databricks.
 
-O script suporta dois contextos de execução:
-
-1. Dentro do Databricks, usando a sessão Spark existente e ``spark.sql()``.
-2. Fora do Databricks, usando o ``databricks-sql-connector`` e um SQL Warehouse.
-
-A operação padrão é idempotente: somente cria objetos ausentes. A remoção e
-recriação completas ficam bloqueadas por padrão.
+O script foi desenhado para ser executado localmente, em um job do Databricks ou
+em um pipeline do GitHub Actions. A operação padrão é idempotente: somente cria
+objetos ausentes. A remoção e recriação completas ficam bloqueadas por padrão.
 """
 
 from __future__ import annotations
@@ -21,10 +17,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    from databricks import sql
+except ImportError as exc:  # pragma: no cover - mensagem amigável para execução local
+    raise SystemExit(
+        "Dependência ausente. Instale com: "
+        "python -m pip install -r requirements-ci.txt"
+    ) from exc
+
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SUPPORTED_ENVIRONMENTS = ("desenv", "main")
-EXECUTION_MODES = ("auto", "spark", "sql-connector")
 
 
 @dataclass(frozen=True)
@@ -38,26 +41,15 @@ class CatalogPlan:
     volumes: tuple[dict[str, Any], ...]
 
 
-def default_config_path() -> str:
-    """Localiza o manifesto relativo ao script ou usa o diretório atual."""
-
-    script_path = globals().get("__file__")
-    if script_path:
-        repository_config = Path(script_path).resolve().parents[1] / "config" / "catalogs.json"
-        if repository_config.exists():
-            return str(repository_config)
-    return "config/catalogs.json"
-
-
 def parse_args() -> argparse.Namespace:
-    """Lê argumentos de linha de comando e permite uso em CI/CD ou Jobs."""
+    """Lê argumentos de linha de comando e permite uso em CI/CD."""
 
     parser = argparse.ArgumentParser(
         description="Cria ou recria a estrutura de catálogos do HandsOn Beta."
     )
     parser.add_argument(
         "--config",
-        default=default_config_path(),
+        default="config/catalogs.json",
         help="Caminho do manifesto JSON de catálogos.",
     )
     parser.add_argument(
@@ -65,15 +57,6 @@ def parse_args() -> argparse.Namespace:
         choices=SUPPORTED_ENVIRONMENTS,
         default=os.getenv("DATABRICKS_ENVIRONMENT", "main"),
         help="Ambiente alvo. Default: DATABRICKS_ENVIRONMENT ou main.",
-    )
-    parser.add_argument(
-        "--execution-mode",
-        choices=EXECUTION_MODES,
-        default=os.getenv("DATABRICKS_EXECUTION_MODE", "auto"),
-        help=(
-            "auto detecta Databricks e usa Spark; spark força spark.sql(); "
-            "sql-connector usa um SQL Warehouse externo."
-        ),
     )
     parser.add_argument(
         "--recreate",
@@ -289,61 +272,9 @@ def require_destructive_confirmation(args: argparse.Namespace) -> None:
         raise ValueError("Confirmação não recebida; operação destrutiva cancelada.")
 
 
-def is_databricks_runtime() -> bool:
-    """Indica se o processo aparenta estar dentro do Databricks."""
+def execute_statements(statements: Iterable[str]) -> None:
+    """Executa os comandos em um SQL Warehouse usando credenciais do ambiente."""
 
-    return (
-        globals().get("spark") is not None
-        or bool(os.getenv("DATABRICKS_RUNTIME_VERSION"))
-        or bool(os.getenv("DB_HOME"))
-    )
-
-
-def get_spark_session() -> Any:
-    """Obtém a sessão Spark do notebook ou de um Python file task."""
-
-    existing_spark = globals().get("spark")
-    if existing_spark is not None:
-        return existing_spark
-
-    try:
-        from pyspark.sql import SparkSession
-    except ImportError as exc:
-        raise EnvironmentError(
-            "PySpark não está disponível. Execute o arquivo em um compute Databricks "
-            "ou use --execution-mode sql-connector fora do Databricks."
-        ) from exc
-
-    return SparkSession.builder.getOrCreate()
-
-
-def execute_with_spark(statements: Iterable[str], spark_session: Any) -> None:
-    """Executa DDL com a sessão Spark nativa do Databricks."""
-
-    for statement in statements:
-        print(f"Executando via Spark: {statement}")
-        spark_session.sql(statement)
-
-
-def get_sql_connector() -> Any:
-    """Carrega o conector somente quando a execução externa for solicitada."""
-
-    try:
-        from databricks import sql as databricks_sql
-    except ImportError as exc:
-        raise EnvironmentError(
-            "Dependência databricks-sql-connector ausente. "
-            "Dentro do Databricks, use --execution-mode spark ou deixe o modo auto. "
-            "Fora do Databricks, instale com: "
-            "python -m pip install -r requirements-ci.txt"
-        ) from exc
-    return databricks_sql
-
-
-def execute_with_sql_connector(statements: Iterable[str]) -> None:
-    """Executa os comandos em um SQL Warehouse externo."""
-
-    databricks_sql = get_sql_connector()
     required = {
         "DATABRICKS_SERVER_HOSTNAME": os.getenv("DATABRICKS_SERVER_HOSTNAME"),
         "DATABRICKS_HTTP_PATH": os.getenv("DATABRICKS_HTTP_PATH"),
@@ -355,54 +286,15 @@ def execute_with_sql_connector(statements: Iterable[str]) -> None:
             "Variáveis de conexão ausentes: " + ", ".join(missing)
         )
 
-    with databricks_sql.connect(
+    with sql.connect(
         server_hostname=required["DATABRICKS_SERVER_HOSTNAME"],
         http_path=required["DATABRICKS_HTTP_PATH"],
         access_token=required["DATABRICKS_TOKEN"],
     ) as connection:
         with connection.cursor() as cursor:
             for statement in statements:
-                print(f"Executando via SQL Warehouse: {statement}")
+                print(f"Executando: {statement}")
                 cursor.execute(statement)
-
-
-def execute_statements(
-    statements: Iterable[str],
-    execution_mode: str = "auto",
-    spark_session: Any | None = None,
-) -> None:
-    """Executa DDL via Spark nativo ou pelo conector SQL externo."""
-
-    if execution_mode not in EXECUTION_MODES:
-        raise ValueError(
-            f"Modo de execução inválido: {execution_mode!r}. "
-            f"Use um destes: {', '.join(EXECUTION_MODES)}."
-        )
-
-    if execution_mode in {"auto", "spark"}:
-        if spark_session is None and execution_mode == "spark":
-            spark_session = get_spark_session()
-        elif spark_session is None and execution_mode == "auto":
-            try:
-                # Em um Python file task, a variável global `spark` pode não existir,
-                # embora PySpark esteja disponível no runtime do Databricks.
-                spark_session = get_spark_session()
-            except Exception:
-                # Fora do Databricks, o modo auto continua para o conector SQL.
-                # Dentro do Databricks, preservamos a falha para não mascarar
-                # problemas de inicialização do compute.
-                if is_databricks_runtime():
-                    raise
-        if spark_session is not None:
-            execute_with_spark(statements, spark_session)
-            return
-
-    if execution_mode == "spark":
-        raise EnvironmentError(
-            "O modo spark foi solicitado, mas não foi possível obter uma sessão Spark."
-        )
-
-    execute_with_sql_connector(statements)
 
 
 def main() -> int:
@@ -422,15 +314,14 @@ def main() -> int:
         print(
             f"Ambiente: {plan.environment} | Catálogo: {plan.catalog} | "
             f"Schemas: {len(plan.schemas)} | Volumes: "
-            f"{len(plan.volumes) if args.create_volumes else 0} | "
-            f"Modo: {args.execution_mode}"
+            f"{len(plan.volumes) if args.create_volumes else 0}"
         )
         if args.dry_run:
             print("Modo dry-run: nenhum comando será enviado ao Databricks.")
             print("\n".join(statements))
             return 0
 
-        execute_statements(statements, execution_mode=args.execution_mode)
+        execute_statements(statements)
         print("Estrutura de catálogos aplicada com sucesso.")
         return 0
     except (EnvironmentError, FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
