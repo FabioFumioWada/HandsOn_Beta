@@ -23,7 +23,9 @@ import logging
 import os
 import random
 import re
+import shutil
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -44,7 +46,7 @@ except ImportError as exc:  # pragma: no cover - mensagem operacional
     ) from exc
 
 
-SCRIPT_VERSION = "1.0.2"
+SCRIPT_VERSION = "1.0.3"
 DEFAULT_OUTPUT_DIR = "/Volumes/handson_beta/landing_zone/arquivos/"
 DEFAULT_IBGE_PAGE_URL = (
     "https://www.ibge.gov.br/estatisticas/sociais/populacao/"
@@ -112,11 +114,23 @@ class Throttle:
 
 
 class JsonlLogger:
-    """Mantém uma trilha simples e legível de cada evento da ingestão."""
+    """Mantém eventos em arquivo local e publica o log completo ao final.
+
+    Algumas Unity Catalog Volumes não implementam append/seek como um arquivo
+    POSIX comum. Escrever diretamente com ``open('a')`` pode gerar ``Errno 29
+    Illegal seek``. O spool local evita esse problema e a cópia final usa
+    somente escrita sequencial no destino.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        spool_dir = Path(tempfile.gettempdir()) / "handson_beta_downloader_logs"
+        spool_dir.mkdir(parents=True, exist_ok=True)
+        self.local_path = spool_dir / (
+            f"{path.stem}_{os.getpid()}_{time.time_ns()}.jsonl"
+        )
+        self.published_path: Path | None = None
 
     def write(self, event: str, **data: Any) -> None:
         record = {
@@ -124,8 +138,27 @@ class JsonlLogger:
             "event": event,
             **data,
         }
-        with self.path.open("a", encoding="utf-8") as file:
+        with self.local_path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+    def publish(self) -> Path:
+        """Copia o spool para a Volume em uma operação sequencial."""
+
+        if not self.local_path.exists():
+            self.local_path.touch()
+        try:
+            shutil.copyfile(self.local_path, self.path)
+            self.published_path = self.path
+            return self.path
+        except OSError as exc:
+            logging.warning(
+                "Não foi possível publicar o log na Volume (%s); "
+                "o spool local ficou em %s",
+                exc,
+                self.local_path,
+            )
+            self.published_path = self.local_path
+            return self.local_path
 
 
 class CatalogError(RuntimeError):
@@ -693,6 +726,7 @@ class Downloader:
 
     def save_summary(self, resources: Sequence[Resource]) -> Path:
         path = self.control_dir / "ultimo_resumo.json"
+        log_path = self.logger.publish()
         payload = {
             "finished_at_utc": datetime.now(timezone.utc).isoformat(),
             "script_version": SCRIPT_VERSION,
@@ -703,6 +737,8 @@ class Downloader:
             "failed": self.failed,
             "discovery_errors": self.discovery_errors,
             "manifest_path": str(self.manifest_path),
+            "log_path": str(log_path),
+            "log_published_to_volume": log_path == self.logger.path,
         }
         path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"

@@ -1,9 +1,9 @@
 # Ingestão de arquivos públicos para a landing zone
 
 **Projeto:** HandsOn Beta  
-**Responsável pelo artefato:** Fabio Fumio Wada 
+**Responsável pelo artefato:** Fábio Fumio Wada 
 **Script:** [`scripts/baixar_arquivos_portais.py`](../scripts/baixar_arquivos_portais.py)  
-**Versão:** 1.0.2  
+**Versão:** 1.0.3  
 **Data de referência das fontes:** 06/09/2026
 
 ## Objetivo
@@ -39,7 +39,7 @@ O downloader é a etapa de ingestão da arquitetura medalhão. Ele não transfor
 | Silver | Padronizar formatos, codificação, nomes de colunas, tipos, datas e chaves; deduplicar usando o manifesto e o hash SHA-256 | Tabelas Delta por fonte e domínio, a serem implementadas em notebook/job posterior |
 | Gold | Consolidar variáveis para estudo e previsão das bandeiras tarifárias, com métricas e features prontas para ML | Tabelas Delta de features, treino, validação e previsões, a serem implementadas em etapa posterior |
 
-O diretório `_controle` é operacional e não faz parte dos dados analíticos. Ele guarda o catálogo descoberto, o manifesto de downloads, o resumo da execução e logs JSON Lines.
+O diretório `_controle` é operacional e não faz parte dos dados analíticos. Ele guarda o catálogo descoberto, o manifesto de downloads, o resumo da execução e logs JSON Lines. Para evitar incompatibilidades de `append/seek` em Unity Catalog Volumes, os eventos são acumulados em um spool local do driver e o arquivo JSONL completo é publicado na Volume ao final da execução; o resumo registra o caminho efetivamente publicado.
 
 ## Controle de ritmo e proteção contra bloqueio
 
