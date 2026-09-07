@@ -1,0 +1,12 @@
+[33m8eb9415[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mdesenv[m[33m, [m[1;32mbackup/desenv-antes-rebase-20260906-210949[m[33m, [m[1;32mbackup/desenv-antes-rebase-2-20260906-211332[m[33m)[m HEAD@{0}: reset: moving to HEAD
+[33m8eb9415[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mdesenv[m[33m, [m[1;32mbackup/desenv-antes-rebase-20260906-210949[m[33m, [m[1;32mbackup/desenv-antes-rebase-2-20260906-211332[m[33m)[m HEAD@{1}: checkout: moving from desenv to desenv
+[33m8eb9415[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mdesenv[m[33m, [m[1;32mbackup/desenv-antes-rebase-20260906-210949[m[33m, [m[1;32mbackup/desenv-antes-rebase-2-20260906-211332[m[33m)[m HEAD@{2}: commit: Reindexando
+[33m0c5ed4f[m HEAD@{3}: commit: Adiciona catalogs.json e ajusta arquivos
+[33md6813e5[m HEAD@{4}: commit: chore: reaplicar alteracoes locais apos sincronizacao
+[33mdfe03eb[m[33m ([m[1;32mbackup/desenv-antes-da-sincronizacao[m[33m)[m HEAD@{5}: reset: moving to HEAD
+[33mdfe03eb[m[33m ([m[1;32mbackup/desenv-antes-da-sincronizacao[m[33m)[m HEAD@{6}: checkout: moving from desenv to desenv
+[33mdfe03eb[m[33m ([m[1;32mbackup/desenv-antes-da-sincronizacao[m[33m)[m HEAD@{7}: commit: Inclusão dos scripts de download dos arquivos-fontes para a Landing Zone 2
+[33mb578d56[m HEAD@{8}: commit: Inclusão dos scripts de download dos arquivos-fontes para a Landing Zone
+[33mf38cb9c[m HEAD@{9}: commit: Atualização dos scripts de catáogo do Databricks - 5
+[33m974932b[m HEAD@{10}: commit: Atualização dos scripts de catáogo do Databricks - 4
+[33m203b6fa[m HEAD@{11}: commit: Atualização dos scripts de catáogo do Databricks - 3
