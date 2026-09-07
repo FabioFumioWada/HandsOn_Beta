@@ -16,6 +16,7 @@ A tabela global de controle é compartilhada com os fluxos ANEEL, CCEE e ONS.
 from __future__ import annotations
 
 import re
+import sys
 import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -180,15 +181,18 @@ def read_excel(path: str) -> List[Tuple[str, DataFrame]]:
     package_command = "xlrd>=2.0.1" if engine == "xlrd" else "openpyxl>=3.1.0"
     if importlib.util.find_spec(engine) is None:
         raise RuntimeError(
-            f"A leitura {extension} requer o pacote {engine} no cluster Databricks. "
-            f"Adicione a dependência PyPI `{package_command}` ao compute/Job e reinicie o cluster."
+            f"A leitura {extension} requer o pacote {engine}, mas ele não está disponível no Python efetivo. "
+            f"Python: {sys.executable}. Origem esperada: biblioteca PyPI do Compute/Job. "
+            f"Adicione `{package_command}` como biblioteca do Compute/Job, reinicie o Compute, abra uma nova sessão "
+            f"e execute scripts/00_verificar_dependencias_excel.py antes da ingestão."
         )
     try:
         workbook = pd.ExcelFile(path, engine=engine)
     except ImportError as exc:
         raise RuntimeError(
-            f"A leitura {extension} não conseguiu inicializar o engine {engine}. "
-            f"Confirme a instalação PyPI `{package_command}` no mesmo compute da execução."
+            f"A leitura {extension} não conseguiu inicializar o engine {engine} no Python {sys.executable}. "
+            f"Confirme a instalação PyPI `{package_command}` como biblioteca do Compute/Job, reinicie o Compute "
+            f"e abra uma nova sessão antes da execução."
         ) from exc
     frames: List[Tuple[str, DataFrame]] = []
     for sheet_name in workbook.sheet_names:
