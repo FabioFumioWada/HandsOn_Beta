@@ -26,7 +26,7 @@ from pyspark.sql import types as T
 # Parâmetros do processo
 # -----------------------------------------------------------------------------
 LANDING_ZONE = "/Volumes/handson_beta/landing_zone/arquivos/"
-BRONZE_ROOT = "/Volumes/handson_beta/prata/bronze/"
+BRONZE_ROOT = "/Volumes/handson_beta/bronze/"
 BRONZE_SCHEMA = "handson_beta.bronze"
 DICTIONARY_TABLE = f"{BRONZE_SCHEMA}.dicionario_dados_bronze"
 AUDIT_TABLE = f"{BRONZE_SCHEMA}.controle_carga_bronze"
