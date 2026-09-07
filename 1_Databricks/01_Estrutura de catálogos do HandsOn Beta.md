@@ -1,6 +1,6 @@
 # Estrutura de catálogos do HandsOn Beta
 
-**Autor:** Fabio Fumio Wada  
+**Autor:** Manus AI  
 **Objetivo:** provisionar a estrutura inicial de catálogos, schemas e volumes do projeto de previsão de bandeiras tarifárias no Databricks.
 
 ## 1. Visão geral
