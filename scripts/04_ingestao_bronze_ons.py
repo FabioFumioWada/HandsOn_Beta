@@ -3,18 +3,23 @@
 Fluxo executado no Databricks como Python file:
 
 1. lista todos os arquivos cujo nome inicia com ONS na Landing Zone;
-2. grava a listagem em handson_beta.bronze_ons.lista_arquivos_ons;
-3. cria o schema handson_beta.bronze_ons;
-4. importa somente arquivos ONS CSV/XLS/XLSX, agrupando por nome sem o ano;
-5. cria tabelas Delta gerenciadas, uma por conjunto de dados;
-6. cria o dicionário de dados da fonte ONS; e
-7. grava controle e log em handson_beta.controle_global.controle_importacao.
+2. grava o inventário em handson_beta.bronze_ons.lista_arquivos_ons;
+3. cria os schemas Bronze da ONS e de controle global;
+4. seleciona um formato canônico por dataset/ano para evitar duplicação entre
+   CSV, PARQUET e XLSX publicados pelo catálogo ONS;
+5. lê CSV, PARQUET e XLS/XLSX, preservando metadados de origem;
+6. cria tabelas Delta gerenciadas, uma por dataset ONS;
+7. cria o dicionário de dados da fonte ONS; e
+8. grava controle e log em handson_beta.controle_global.controle_importacao.
 
-A tabela global de controle é compartilhada com os fluxos ANEEL, CCEE e ONS.
+O script foi projetado para consumir arquivos previamente baixados pelo
+scripts/02_baixar_arquivos_portais.py, que consulta o catálogo CKAN oficial:
+https://dados.ons.org.br/api/3/action/package_show?id=ena-diario-por-reservatorio
 """
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 import unicodedata
@@ -22,9 +27,9 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from functools import reduce
 from pathlib import PurePosixPath
-from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, DefaultDict, Dict, List, Optional, Sequence, Tuple
 
-from pyspark.sql import DataFrame, Row, SparkSession, Window
+from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
@@ -41,20 +46,19 @@ GLOBAL_CONTROL_SCHEMA = f"{BRONZE_CATALOG}.controle_global"
 GLOBAL_CONTROL_TABLE = f"{GLOBAL_CONTROL_SCHEMA}.controle_importacao"
 FILE_LIST_TABLE = f"{BRONZE_SCHEMA}.lista_arquivos_ons"
 DICTIONARY_TABLE = f"{BRONZE_SCHEMA}.dicionario_dados_ons"
-ELIGIBLE_EXTENSIONS = {".csv", ".xls", ".xlsx"}
+ELIGIBLE_EXTENSIONS = {".csv", ".parquet", ".xls", ".xlsx"}
+# Parquet é preferido quando disponível; CSV é a alternativa principal; Excel
+# fica como fallback para os anos/recursos que não possuem os formatos anteriores.
+FORMAT_PRIORITY = {".parquet": 0, ".csv": 1, ".xlsx": 2, ".xls": 3}
 YEAR_PATTERN = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 RUN_TS = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
-try:
-    spark.conf.set("spark.sql.repl.eagerEval.enabled", "false")
-except Exception:
-    pass
 
 
 # -----------------------------------------------------------------------------
-# Utilitários
+# Utilitários de identificação e caminhos
 # -----------------------------------------------------------------------------
 def normalize_text(value: Any) -> str:
     text = "" if value is None else str(value)
@@ -77,10 +81,12 @@ def source_year(file_name: str) -> Optional[int]:
 
 
 def dataset_key(file_name: str) -> str:
+    """Deriva o dataset ONS sem o prefixo local e sem o ano."""
     stem = PurePosixPath(file_name).stem
+    stem = re.sub(r"^ONS[-_ ]+", "", stem, flags=re.IGNORECASE)
     stem_without_year = YEAR_PATTERN.sub("", stem)
     stem_without_year = re.sub(r"[_\- ]{2,}", "_", stem_without_year).strip("_ -")
-    return sanitize_identifier(stem_without_year)
+    return f"ons_{sanitize_identifier(stem_without_year)}"
 
 
 def unique_column_names(columns: Sequence[str]) -> List[str]:
@@ -107,8 +113,18 @@ def unique_column_names(columns: Sequence[str]) -> List[str]:
     return output
 
 
+def python_read_path(path: str) -> str:
+    """Converte URI DBFS de Volume para o caminho POSIX usado por pandas."""
+    if path.startswith("dbfs:/Volumes/"):
+        return "/Volumes/" + path[len("dbfs:/Volumes/") :]
+    return path
+
+
+# -----------------------------------------------------------------------------
+# Descoberta e leitura
+# -----------------------------------------------------------------------------
 def list_source_files(path: str) -> List[Dict[str, Any]]:
-    """Lista todos os arquivos ONS, incluindo extensões não elegíveis."""
+    """Lista arquivos ONS, incluindo extensões não elegíveis."""
     entries: List[Dict[str, Any]] = []
     pending = [path.rstrip("/")]
     prefix_normalized = SOURCE_PREFIX.casefold()
@@ -128,6 +144,7 @@ def list_source_files(path: str) -> List[Dict[str, Any]]:
                     "arquivo_origem": file_name,
                     "caminho_origem": item_path,
                     "extensao": extension or None,
+                    "formato": extension.lstrip(".").upper() if extension else None,
                     "elegivel_importacao": extension in ELIGIBLE_EXTENSIONS,
                     "nome_dataset": dataset_key(file_name),
                     "ano": source_year(file_name),
@@ -138,18 +155,37 @@ def list_source_files(path: str) -> List[Dict[str, Any]]:
     return sorted(entries, key=lambda item: item["caminho_origem"].lower())
 
 
+def select_canonical_files(source_files: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Escolhe um formato por dataset/ano e retorna selecionados e alternativas."""
+    eligible = [item for item in source_files if item["elegivel_importacao"]]
+    grouped: DefaultDict[Tuple[str, Optional[int]], List[Dict[str, Any]]] = defaultdict(list)
+    for item in eligible:
+        grouped[(item["nome_dataset"], item["ano"])].append(item)
+
+    selected: List[Dict[str, Any]] = []
+    alternatives: List[Dict[str, Any]] = []
+    for key in sorted(grouped, key=lambda value: (value[0], value[1] or 0)):
+        group = sorted(
+            grouped[key],
+            key=lambda item: (FORMAT_PRIORITY.get(item["extensao"], 99), item["caminho_origem"]),
+        )
+        selected.append(group[0])
+        alternatives.extend(group[1:])
+    return selected, alternatives
+
+
 def infer_csv_delimiter(path: str) -> str:
     try:
-        sample = dbutils.fs.head(path, 65536)  # noqa: F821 - disponível no Databricks
+        sample = dbutils.fs.head(path, 65536)  # noqa: F821
     except Exception:
-        return ","
+        return ";"
     lines = [line for line in sample.splitlines() if line.strip()]
     if not lines:
-        return ","
+        return ";"
     header = lines[0]
-    candidates = {delimiter: header.count(delimiter) for delimiter in [",", ";", "\t", "|"]}
+    candidates = {delimiter: header.count(delimiter) for delimiter in [";", ",", "\t", "|"]}
     delimiter, count = max(candidates.items(), key=lambda item: item[1])
-    return delimiter if count > 0 else ","
+    return delimiter if count > 0 else ";"
 
 
 def read_csv(path: str) -> DataFrame:
@@ -167,37 +203,31 @@ def read_csv(path: str) -> DataFrame:
     )
 
 
+def read_parquet(path: str) -> DataFrame:
+    return spark.read.format("parquet").load(path)
+
+
 def read_excel(path: str) -> List[Tuple[str, DataFrame]]:
-    """Lê todas as abas de arquivos XLS ou XLSX com a dependência correta."""
+    """Lê todas as abas XLS/XLSX com caminho POSIX e schema de strings."""
     try:
-        import importlib.util
         import pandas as pd
     except ImportError as exc:
         raise RuntimeError(
-            "A leitura XLS/XLSX requer pandas no cluster Databricks. "
-            "Instale pandas como biblioteca do cluster ou dependência do Job."
+            "A leitura ONS XLS/XLSX requer pandas no ambiente efetivo do Job."
         ) from exc
 
     extension = PurePosixPath(path).suffix.lower()
     if extension not in {".xls", ".xlsx"}:
-        raise ValueError(f"Extensão Excel não suportada pelo leitor: {extension}")
+        raise ValueError(f"Extensão Excel não suportada: {extension}")
     engine = "xlrd" if extension == ".xls" else "openpyxl"
     package_command = "xlrd>=2.0.1" if engine == "xlrd" else "openpyxl>=3.1.0"
     if importlib.util.find_spec(engine) is None:
         raise RuntimeError(
-            f"A leitura {extension} requer o pacote {engine}, mas ele não está disponível no Python efetivo. "
-            f"Python: {sys.executable}. Origem esperada: biblioteca PyPI do Compute/Job. "
-            f"Adicione `{package_command}` como biblioteca do Compute/Job, reinicie o Compute, abra uma nova sessão "
-            f"e execute scripts/00_verificar_dependencias_excel.py antes da ingestão."
+            f"A leitura {extension} requer {package_command}; pacote ausente no Python {sys.executable}."
         )
-    try:
-        workbook = pd.ExcelFile(path, engine=engine)
-    except ImportError as exc:
-        raise RuntimeError(
-            f"A leitura {extension} não conseguiu inicializar o engine {engine} no Python {sys.executable}. "
-            f"Confirme a instalação PyPI `{package_command}` como biblioteca do Compute/Job, reinicie o Compute "
-            f"e abra uma nova sessão antes da execução."
-        ) from exc
+
+    python_path = python_read_path(path)
+    workbook = pd.ExcelFile(python_path, engine=engine)
     frames: List[Tuple[str, DataFrame]] = []
     for sheet_name in workbook.sheet_names:
         pdf = pd.read_excel(workbook, sheet_name=sheet_name, dtype=object)
@@ -205,7 +235,14 @@ def read_excel(path: str) -> List[Tuple[str, DataFrame]]:
         if pdf.empty:
             continue
         pdf.columns = unique_column_names([str(column) for column in pdf.columns])
-        frames.append((sheet_name, spark.createDataFrame(pdf)))
+        string_schema = T.StructType(
+            [T.StructField(str(column), T.StringType(), True) for column in pdf.columns]
+        )
+        rows = [
+            tuple(None if pd.isna(value) else str(value) for value in row)
+            for row in pdf.itertuples(index=False, name=None)
+        ]
+        frames.append((sheet_name, spark.createDataFrame(rows, schema=string_schema)))
     return frames
 
 
@@ -245,8 +282,10 @@ def add_duplicate_indices(df: DataFrame) -> DataFrame:
     )
 
 
+# -----------------------------------------------------------------------------
+# Persistência e controle
+# -----------------------------------------------------------------------------
 def write_table(df: DataFrame, table_name: str) -> None:
-    """Grava tabela Delta gerenciada, sem path de Volume."""
     (
         df.write.format("delta")
         .mode("overwrite")
@@ -276,9 +315,9 @@ def control_schema() -> T.StructType:
 def append_control(rows: List[Dict[str, Any]]) -> None:
     if not rows:
         return
-    control_df = spark.createDataFrame(rows, schema=control_schema())
     (
-        control_df.write.format("delta")
+        spark.createDataFrame(rows, schema=control_schema())
+        .write.format("delta")
         .mode("append")
         .option("mergeSchema", "true")
         .saveAsTable(GLOBAL_CONTROL_TABLE)
@@ -292,9 +331,15 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {BRONZE_SCHEMA}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {GLOBAL_CONTROL_SCHEMA}")
 
 source_files = list_source_files(LANDING_ZONE)
+if not source_files:
+    raise RuntimeError(
+        f"Nenhum arquivo iniciado por {SOURCE_PREFIX} foi encontrado em {LANDING_ZONE}. "
+        "Execute primeiro a descoberta/download ONS na Landing Zone."
+    )
+
+selected_files, alternative_files = select_canonical_files(source_files)
 control_rows: List[Dict[str, Any]] = []
 
-# Item 1: listagem de todos os arquivos iniciados por ONS.
 file_list_schema = T.StructType(
     [
         T.StructField("run_id", T.StringType(), False),
@@ -302,7 +347,9 @@ file_list_schema = T.StructType(
         T.StructField("arquivo_origem", T.StringType(), False),
         T.StructField("caminho_origem", T.StringType(), False),
         T.StructField("extensao", T.StringType(), True),
+        T.StructField("formato", T.StringType(), True),
         T.StructField("elegivel_importacao", T.BooleanType(), False),
+        T.StructField("selecionado_ingestao", T.BooleanType(), False),
         T.StructField("nome_dataset", T.StringType(), False),
         T.StructField("ano", T.IntegerType(), True),
         T.StructField("tamanho_bytes", T.LongType(), True),
@@ -310,43 +357,36 @@ file_list_schema = T.StructType(
         T.StructField("data_listagem_utc", T.StringType(), False),
     ]
 )
+
+selected_paths = {item["caminho_origem"] for item in selected_files}
 file_list_rows = [
     {
         **item,
         "run_id": RUN_ID,
         "fonte": SOURCE_PREFIX,
+        "selecionado_ingestao": item["caminho_origem"] in selected_paths,
         "data_listagem_utc": RUN_TS,
     }
     for item in source_files
 ]
-file_list_df = spark.createDataFrame(file_list_rows, schema=file_list_schema)
-write_table(file_list_df, FILE_LIST_TABLE)
+write_table(spark.createDataFrame(file_list_rows, schema=file_list_schema), FILE_LIST_TABLE)
 
-append_control(
-    [
-        {
-            "run_id": RUN_ID,
-            "fonte": SOURCE_PREFIX,
-            "etapa": "LISTAGEM_LANDING_ZONE",
-            "arquivo_origem": None,
-            "caminho_origem": LANDING_ZONE,
-            "nome_dataset": None,
-            "tabela_destino": FILE_LIST_TABLE,
-            "status": "SUCESSO",
-            "quantidade_registros": len(source_files),
-            "mensagem": f"Foram listados {len(source_files)} arquivos iniciados por {SOURCE_PREFIX}.",
-            "data_execucao_utc": RUN_TS,
-        }
-    ]
+control_rows.append(
+    {
+        "run_id": RUN_ID,
+        "fonte": SOURCE_PREFIX,
+        "etapa": "LISTAGEM_LANDING_ZONE",
+        "arquivo_origem": None,
+        "caminho_origem": LANDING_ZONE,
+        "nome_dataset": None,
+        "tabela_destino": FILE_LIST_TABLE,
+        "status": "SUCESSO",
+        "quantidade_registros": len(source_files),
+        "mensagem": f"Foram listados {len(source_files)} arquivos iniciados por {SOURCE_PREFIX}; {len(selected_files)} foram selecionados.",
+        "data_execucao_utc": RUN_TS,
+    }
 )
 
-# Item 2: importar somente CSV/XLS/XLSX iniciados por ONS.
-eligible_files = [item for item in source_files if item["elegivel_importacao"]]
-files_by_dataset: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
-for file_info in eligible_files:
-    files_by_dataset[file_info["nome_dataset"]].append(file_info)
-
-# Registra arquivos ONS fora do escopo no controle global.
 for file_info in source_files:
     if not file_info["elegivel_importacao"]:
         control_rows.append(
@@ -360,31 +400,58 @@ for file_info in source_files:
                 "tabela_destino": None,
                 "status": "NAO_ELEGIVEL_EXTENSAO",
                 "quantidade_registros": None,
-                "mensagem": "Arquivo iniciado por ONS, mas fora do escopo CSV/XLS/XLSX.",
+                "mensagem": "Arquivo ONS fora do escopo CSV/PARQUET/XLS/XLSX.",
                 "data_execucao_utc": RUN_TS,
             }
         )
 
-# Item 2: cada conjunto ONS vira uma tabela no schema bronze_ons.
+for file_info in alternative_files:
+    control_rows.append(
+        {
+            "run_id": RUN_ID,
+            "fonte": SOURCE_PREFIX,
+            "etapa": "VALIDACAO_ARQUIVO",
+            "arquivo_origem": file_info["arquivo_origem"],
+            "caminho_origem": file_info["caminho_origem"],
+            "nome_dataset": file_info["nome_dataset"],
+            "tabela_destino": None,
+            "status": "NAO_SELECIONADO_FORMATO_CANONICO",
+            "quantidade_registros": None,
+            "mensagem": "Recurso alternativo do mesmo dataset/ano; formato canônico já selecionado para evitar duplicação.",
+            "data_execucao_utc": RUN_TS,
+        }
+    )
+
+files_by_dataset: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
+for file_info in selected_files:
+    files_by_dataset[file_info["nome_dataset"]].append(file_info)
+
 dictionary_rows: List[Dict[str, Any]] = []
-for dataset_key, group_files in sorted(files_by_dataset.items()):
-    table_name = f"{BRONZE_SCHEMA}.{sanitize_identifier(dataset_key)}"
+ingestion_errors = 0
+created_tables: List[str] = []
+
+for dataset_name, group_files in sorted(files_by_dataset.items()):
+    table_name = f"{BRONZE_SCHEMA}.{sanitize_identifier(dataset_name)}"
     source_names = [item["arquivo_origem"] for item in group_files]
     try:
         frames: List[DataFrame] = []
         for file_info in group_files:
-            if file_info["extensao"] == ".csv":
+            extension = file_info["extensao"]
+            if extension == ".csv":
                 frames.append(add_source_metadata(read_csv(file_info["caminho_origem"]), file_info, None))
+            elif extension == ".parquet":
+                frames.append(add_source_metadata(read_parquet(file_info["caminho_origem"]), file_info, None))
             else:
                 for sheet_name, sheet_df in read_excel(file_info["caminho_origem"]):
                     frames.append(add_source_metadata(sheet_df, file_info, sheet_name))
 
         if not frames:
-            raise RuntimeError("Nenhum DataFrame foi produzido para o conjunto.")
+            raise RuntimeError("Nenhum DataFrame foi produzido para o dataset ONS.")
         combined = reduce(lambda left, right: left.unionByName(right, allowMissingColumns=True), frames)
         bronze_df = add_duplicate_indices(combined)
         write_table(bronze_df, table_name)
         row_count = bronze_df.count()
+        created_tables.append(table_name)
 
         for field in bronze_df.schema.fields:
             dictionary_rows.append(
@@ -392,11 +459,11 @@ for dataset_key, group_files in sorted(files_by_dataset.items()):
                     "fonte": SOURCE_PREFIX,
                     "schema_bronze": SOURCE_SCHEMA,
                     "nome_tabela": table_name,
-                    "nome_dataset": dataset_key,
+                    "nome_dataset": dataset_name,
                     "campo": field.name,
                     "tipo_spark": field.dataType.simpleString(),
                     "nullable": bool(field.nullable),
-                    "finalidade_descricao": f"Campo carregado do conjunto ONS {dataset_key}.",
+                    "finalidade_descricao": f"Campo carregado do conjunto ONS {dataset_name}.",
                     "origens": ", ".join(source_names),
                     "data_atualizacao_utc": RUN_TS,
                 }
@@ -408,15 +475,16 @@ for dataset_key, group_files in sorted(files_by_dataset.items()):
                 "etapa": "INGESTAO_BRONZE",
                 "arquivo_origem": ", ".join(source_names),
                 "caminho_origem": ", ".join(item["caminho_origem"] for item in group_files),
-                "nome_dataset": dataset_key,
+                "nome_dataset": dataset_name,
                 "tabela_destino": table_name,
                 "status": "SUCESSO",
                 "quantidade_registros": row_count,
-                "mensagem": "Conjunto importado com sucesso.",
+                "mensagem": "Dataset ONS importado com o formato canônico por dataset/ano.",
                 "data_execucao_utc": RUN_TS,
             }
         )
     except Exception as exc:
+        ingestion_errors += 1
         control_rows.append(
             {
                 "run_id": RUN_ID,
@@ -424,7 +492,7 @@ for dataset_key, group_files in sorted(files_by_dataset.items()):
                 "etapa": "INGESTAO_BRONZE",
                 "arquivo_origem": ", ".join(source_names),
                 "caminho_origem": ", ".join(item["caminho_origem"] for item in group_files),
-                "nome_dataset": dataset_key,
+                "nome_dataset": dataset_name,
                 "tabela_destino": table_name,
                 "status": "ERRO",
                 "quantidade_registros": None,
@@ -433,7 +501,6 @@ for dataset_key, group_files in sorted(files_by_dataset.items()):
             }
         )
 
-# Dicionário específico da ONS.
 if dictionary_rows:
     dictionary_schema = T.StructType(
         [
@@ -451,23 +518,22 @@ if dictionary_rows:
     )
     write_table(spark.createDataFrame(dictionary_rows, schema=dictionary_schema), DICTIONARY_TABLE)
 
-# Item 3: grava o controle e o log global para reutilização pelas demais fontes.
 append_control(control_rows)
-
-run_control_df = spark.table(GLOBAL_CONTROL_TABLE).filter(F.col("run_id") == RUN_ID)
-run_summary_df = (
-    run_control_df.groupBy("etapa", "status")
-    .agg(F.count(F.lit(1)).alias("quantidade"))
-    .orderBy("etapa", "status")
-)
 
 print(f"Fonte processada: {SOURCE_PREFIX}")
 print(f"Arquivos ONS listados: {len(source_files)}")
-print(f"Arquivos ONS elegíveis: {len(eligible_files)}")
-print(f"Conjuntos processados: {len(files_by_dataset)}")
+print(f"Arquivos ONS selecionados: {len(selected_files)}")
+print(f"Datasets ONS processados: {len(files_by_dataset)}")
+print(f"Tabelas Bronze ONS criadas: {len(created_tables)}")
+print(f"Erros de ingestão: {ingestion_errors}")
 print(f"Tabela de listagem: {FILE_LIST_TABLE}")
 print(f"Schema de dados: {BRONZE_SCHEMA}")
-print(f"Dicionário de dados: {DICTIONARY_TABLE}")
 print(f"Controle global: {GLOBAL_CONTROL_TABLE}")
-print("Resumo da execução por etapa e status:")
-run_summary_df.show(20, truncate=False)
+
+if ingestion_errors:
+    raise RuntimeError(
+        f"A ingestão ONS terminou com {ingestion_errors} dataset(s) em ERRO. "
+        "Consulte handson_beta.controle_global.controle_importacao antes de promover o Job."
+    )
+
+spark.table(GLOBAL_CONTROL_TABLE).filter(F.col("run_id") == RUN_ID).orderBy("etapa", "status").show(truncate=False)
