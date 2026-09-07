@@ -163,19 +163,33 @@ def read_csv(path: str) -> DataFrame:
 
 
 def read_excel(path: str) -> List[Tuple[str, DataFrame]]:
-    """Lê todas as abas de arquivos XLS ou XLSX."""
+    """Lê todas as abas de arquivos XLS ou XLSX com a dependência correta."""
     try:
+        import importlib.util
         import pandas as pd
     except ImportError as exc:
-        raise RuntimeError("A leitura XLS/XLSX requer pandas disponível no cluster.") from exc
+        raise RuntimeError(
+            "A leitura XLS/XLSX requer pandas no cluster Databricks. "
+            "Instale pandas como biblioteca do cluster ou dependência do Job."
+        ) from exc
 
     extension = PurePosixPath(path).suffix.lower()
+    if extension not in {".xls", ".xlsx"}:
+        raise ValueError(f"Extensão Excel não suportada pelo leitor: {extension}")
     engine = "xlrd" if extension == ".xls" else "openpyxl"
+    package_command = "xlrd>=2.0.1" if engine == "xlrd" else "openpyxl>=3.1.0"
+    if importlib.util.find_spec(engine) is None:
+        raise RuntimeError(
+            f"A leitura {extension} requer o pacote {engine} no cluster Databricks. "
+            f"Adicione a dependência PyPI `{package_command}` ao compute/Job e reinicie o cluster."
+        )
     try:
         workbook = pd.ExcelFile(path, engine=engine)
     except ImportError as exc:
-        dependency = "xlrd" if extension == ".xls" else "openpyxl"
-        raise RuntimeError(f"A leitura {extension} requer o pacote {dependency} no cluster Databricks.") from exc
+        raise RuntimeError(
+            f"A leitura {extension} não conseguiu inicializar o engine {engine}. "
+            f"Confirme a instalação PyPI `{package_command}` no mesmo compute da execução."
+        ) from exc
     frames: List[Tuple[str, DataFrame]] = []
     for sheet_name in workbook.sheet_names:
         pdf = pd.read_excel(workbook, sheet_name=sheet_name, dtype=object)

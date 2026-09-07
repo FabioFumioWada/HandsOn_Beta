@@ -6,8 +6,6 @@ DROP SCHEMA IF EXISTS handson_beta.bronze_ccee CASCADE;
 DROP SCHEMA IF EXISTS handson_beta.controle_global CASCADE;
 
 
-
-
 --DROP SCHEMA IF EXISTS handson_beta.bronze CASCADE;
 --DROP SCHEMA IF EXISTS handson_beta.bronze_01 CASCADE;
 --DROP SCHEMA IF EXISTS handson_beta.bronze_02 CASCADE;
