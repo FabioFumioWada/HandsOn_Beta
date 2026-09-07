@@ -1,9 +1,9 @@
 """Instala e valida as dependências Excel usadas pelos fluxos Bronze.
 
 Dependências instaladas:
-    pandas
-    xlrd>=2.0.1       # leitura de arquivos .xls
-    openpyxl>=3.1.0   # leitura de arquivos .xlsx
+    pandas>=2.2,<3       # compatível com databricks-connect 18.x
+    xlrd>=2.0.1          # leitura de arquivos .xls
+    openpyxl>=3.1.0     # leitura de arquivos .xlsx
 
 Execute este arquivo como Python file no driver do Databricks. Para Jobs
 multi-node ou clusters compartilhados, a forma recomendada é cadastrar as
@@ -21,7 +21,7 @@ from typing import Dict, Tuple
 
 
 PACKAGES = (
-    "pandas",
+    "pandas>=2.2,<3",
     "xlrd>=2.0.1",
     "openpyxl>=3.1.0",
 )
@@ -41,7 +41,6 @@ def install_packages() -> None:
         "pip",
         "install",
         "--disable-pip-version-check",
-        "--upgrade",
         *PACKAGES,
     ]
     print("Executando instalação das dependências:")
@@ -80,7 +79,7 @@ def main() -> None:
 
     print(
         "Aviso: em clusters multi-node ou Jobs recorrentes, prefira cadastrar "
-        "pandas, xlrd>=2.0.1 e openpyxl>=3.1.0 como bibliotecas PyPI do compute/Job "
+        "pandas>=2.2,<3, xlrd>=2.0.1 e openpyxl>=3.1.0 como bibliotecas PyPI do compute/Job "
         "e reiniciar o compute antes de executar a ingestão Bronze."
     )
 
