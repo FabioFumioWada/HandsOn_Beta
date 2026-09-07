@@ -29,12 +29,18 @@ from pyspark.sql import types as T
 # -----------------------------------------------------------------------------
 LANDING_ZONE = "/Volumes/handson_beta/landing_zone/arquivos/"
 # No Unity Catalog, um diretório dentro de Volume não pode ser registrado
-# como localização de uma tabela. As tabelas Bronze são, portanto, criadas
-# como tabelas gerenciadas no schema abaixo. A Landing Zone continua sendo lida
-# pelo caminho do Volume informado pelo projeto.
-BRONZE_SCHEMA = "handson_beta.bronze"
-DICTIONARY_TABLE = f"{BRONZE_SCHEMA}.dicionario_dados_bronze"
-AUDIT_TABLE = f"{BRONZE_SCHEMA}.controle_carga_bronze"
+# como localização de uma tabela. As tabelas Bronze são criadas como tabelas
+# gerenciadas. Como o workspace possui limite de 100 tabelas por schema, os
+# conjuntos de dados são distribuídos automaticamente em bronze_01, bronze_02,
+# etc. O dicionário e a auditoria ficam em um schema separado da mesma camada.
+BRONZE_CATALOG = "handson_beta"
+BRONZE_METADATA_SCHEMA = f"{BRONZE_CATALOG}.bronze_meta"
+BRONZE_DATA_SCHEMA_PREFIX = f"{BRONZE_CATALOG}.bronze_"
+MAX_TABLES_PER_SCHEMA = 100
+RESERVED_TABLES_PER_DATA_SCHEMA = 5
+DATA_TABLES_PER_SCHEMA = MAX_TABLES_PER_SCHEMA - RESERVED_TABLES_PER_DATA_SCHEMA
+DICTIONARY_TABLE = f"{BRONZE_METADATA_SCHEMA}.dicionario_dados_bronze"
+AUDIT_TABLE = f"{BRONZE_METADATA_SCHEMA}.controle_carga_bronze"
 RUN_TS = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 ELIGIBLE_EXTENSIONS = {".csv", ".xlsx"}
@@ -322,6 +328,12 @@ def add_duplicate_indices(df: DataFrame) -> DataFrame:
     )
 
 
+def bronze_data_schema(position: int) -> str:
+    """Retorna o schema Bronze do conjunto, respeitando a cota de tabelas."""
+    shard_number = position // DATA_TABLES_PER_SCHEMA + 1
+    return f"{BRONZE_DATA_SCHEMA_PREFIX}{shard_number:02d}"
+
+
 def write_delta_table(df: DataFrame, table_name: str) -> None:
     """Grava uma tabela Delta gerenciada no schema Bronze do Unity Catalog.
 
@@ -361,13 +373,15 @@ for file_info in all_files:
 
 dictionary_lookup = build_dictionary_lookup(dictionary_rows)
 
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {BRONZE_SCHEMA}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {BRONZE_METADATA_SCHEMA}")
 
 run_summary: List[Dict[str, Any]] = []
 dictionary_output: List[Dict[str, Any]] = []
 
-for dataset_key, group_files in sorted(files_by_group.items()):
-    table_name = f"{BRONZE_SCHEMA}.{sanitize_identifier(dataset_key)}"
+for dataset_position, (dataset_key, group_files) in enumerate(sorted(files_by_group.items())):
+    schema_bronze = bronze_data_schema(dataset_position)
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {schema_bronze}")
+    table_name = f"{schema_bronze}.{sanitize_identifier(dataset_key)}"
     frames: List[DataFrame] = []
     source_names: List[str] = []
     try:
@@ -390,6 +404,7 @@ for dataset_key, group_files in sorted(files_by_group.items()):
             dictionary_output.append(
                 {
                     "nome_tabela": table_name,
+                    "schema_bronze": schema_bronze,
                     "nome_dataset": dataset_key,
                     "campo": field.name,
                     "tipo_spark": spark_sql_type(field.dataType),
@@ -406,6 +421,7 @@ for dataset_key, group_files in sorted(files_by_group.items()):
             {
                 "nome_dataset": dataset_key,
                 "nome_tabela": table_name,
+                "schema_bronze": schema_bronze,
                 "arquivos_processados": ", ".join(source_names),
                 "quantidade_arquivos": len(source_names),
                 "quantidade_registros": row_count,
@@ -419,6 +435,7 @@ for dataset_key, group_files in sorted(files_by_group.items()):
             {
                 "nome_dataset": dataset_key,
                 "nome_tabela": table_name,
+                "schema_bronze": schema_bronze,
                 "arquivos_processados": ", ".join(source_names),
                 "quantidade_arquivos": len(source_names),
                 "quantidade_registros": None,
@@ -432,6 +449,7 @@ if dictionary_output:
     dictionary_schema = T.StructType(
         [
             T.StructField("nome_tabela", T.StringType(), False),
+            T.StructField("schema_bronze", T.StringType(), False),
             T.StructField("nome_dataset", T.StringType(), False),
             T.StructField("campo", T.StringType(), False),
             T.StructField("tipo_spark", T.StringType(), False),
@@ -452,6 +470,7 @@ if run_summary:
         [
             T.StructField("nome_dataset", T.StringType(), False),
             T.StructField("nome_tabela", T.StringType(), False),
+            T.StructField("schema_bronze", T.StringType(), False),
             T.StructField("arquivos_processados", T.StringType(), True),
             T.StructField("quantidade_arquivos", T.IntegerType(), True),
             T.StructField("quantidade_registros", T.LongType(), True),
