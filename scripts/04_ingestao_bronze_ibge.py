@@ -5,7 +5,7 @@ Fluxo executado no Databricks como Python file:
 1. lista todos os arquivos cujo nome inicia com IBGE na Landing Zone;
 2. grava a listagem em handson_beta.bronze_ibge.lista_arquivos_ibge;
 3. cria o schema handson_beta.bronze_ibge;
-4. importa somente arquivos IBGE CSV/XLSX, agrupando por nome sem o ano;
+4. importa somente arquivos IBGE CSV/XLS/XLSX, agrupando por nome sem o ano;
 5. cria tabelas Delta gerenciadas, uma por conjunto de dados;
 6. cria o dicionário de dados da fonte IBGE; e
 7. grava controle e log em handson_beta.controle_global.controle_importacao.
@@ -40,7 +40,7 @@ GLOBAL_CONTROL_SCHEMA = f"{BRONZE_CATALOG}.controle_global"
 GLOBAL_CONTROL_TABLE = f"{GLOBAL_CONTROL_SCHEMA}.controle_importacao"
 FILE_LIST_TABLE = f"{BRONZE_SCHEMA}.lista_arquivos_ibge"
 DICTIONARY_TABLE = f"{BRONZE_SCHEMA}.dicionario_dados_ibge"
-ELIGIBLE_EXTENSIONS = {".csv", ".xlsx"}
+ELIGIBLE_EXTENSIONS = {".csv", ".xls", ".xlsx"}
 YEAR_PATTERN = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 RUN_TS = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -162,13 +162,20 @@ def read_csv(path: str) -> DataFrame:
     )
 
 
-def read_xlsx(path: str) -> List[Tuple[str, DataFrame]]:
+def read_excel(path: str) -> List[Tuple[str, DataFrame]]:
+    """Lê todas as abas de arquivos XLS ou XLSX."""
     try:
         import pandas as pd
     except ImportError as exc:
-        raise RuntimeError("A leitura XLSX requer pandas disponível no cluster.") from exc
+        raise RuntimeError("A leitura XLS/XLSX requer pandas disponível no cluster.") from exc
 
-    workbook = pd.ExcelFile(path, engine="openpyxl")
+    extension = PurePosixPath(path).suffix.lower()
+    engine = "xlrd" if extension == ".xls" else "openpyxl"
+    try:
+        workbook = pd.ExcelFile(path, engine=engine)
+    except ImportError as exc:
+        dependency = "xlrd" if extension == ".xls" else "openpyxl"
+        raise RuntimeError(f"A leitura {extension} requer o pacote {dependency} no cluster Databricks.") from exc
     frames: List[Tuple[str, DataFrame]] = []
     for sheet_name in workbook.sheet_names:
         pdf = pd.read_excel(workbook, sheet_name=sheet_name, dtype=object)
@@ -331,7 +338,7 @@ for file_info in source_files:
                 "tabela_destino": None,
                 "status": "NAO_ELEGIVEL_EXTENSAO",
                 "quantidade_registros": None,
-                "mensagem": "Arquivo iniciado por IBGE, mas fora do escopo CSV/XLSX.",
+                "mensagem": "Arquivo iniciado por IBGE, mas fora do escopo CSV/XLS/XLSX.",
                 "data_execucao_utc": RUN_TS,
             }
         )
@@ -347,7 +354,7 @@ for dataset_key, group_files in sorted(files_by_dataset.items()):
             if file_info["extensao"] == ".csv":
                 frames.append(add_source_metadata(read_csv(file_info["caminho_origem"]), file_info, None))
             else:
-                for sheet_name, sheet_df in read_xlsx(file_info["caminho_origem"]):
+                for sheet_name, sheet_df in read_excel(file_info["caminho_origem"]):
                     frames.append(add_source_metadata(sheet_df, file_info, sheet_name))
 
         if not frames:
