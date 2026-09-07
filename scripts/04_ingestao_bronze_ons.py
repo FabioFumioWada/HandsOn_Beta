@@ -47,6 +47,10 @@ RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 RUN_TS = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
+try:
+    spark.conf.set("spark.sql.repl.eagerEval.enabled", "false")
+except Exception:
+    pass
 
 
 # -----------------------------------------------------------------------------
@@ -450,11 +454,20 @@ if dictionary_rows:
 # Item 3: grava o controle e o log global para reutilização pelas demais fontes.
 append_control(control_rows)
 
+run_control_df = spark.table(GLOBAL_CONTROL_TABLE).filter(F.col("run_id") == RUN_ID)
+run_summary_df = (
+    run_control_df.groupBy("etapa", "status")
+    .agg(F.count(F.lit(1)).alias("quantidade"))
+    .orderBy("etapa", "status")
+)
+
 print(f"Fonte processada: {SOURCE_PREFIX}")
 print(f"Arquivos ONS listados: {len(source_files)}")
-print(f"Arquivos ONS elegíveis importados: {len(eligible_files)}")
+print(f"Arquivos ONS elegíveis: {len(eligible_files)}")
+print(f"Conjuntos processados: {len(files_by_dataset)}")
 print(f"Tabela de listagem: {FILE_LIST_TABLE}")
 print(f"Schema de dados: {BRONZE_SCHEMA}")
+print(f"Dicionário de dados: {DICTIONARY_TABLE}")
 print(f"Controle global: {GLOBAL_CONTROL_TABLE}")
-
-spark.table(GLOBAL_CONTROL_TABLE).filter(F.col("run_id") == RUN_ID).orderBy("etapa", "status").show(truncate=False)
+print("Resumo da execução por etapa e status:")
+run_summary_df.show(20, truncate=False)
