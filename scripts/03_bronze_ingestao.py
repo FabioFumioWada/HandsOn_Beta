@@ -1,10 +1,12 @@
-# Databricks notebook source
-# MAGIC %md
-# MAGIC # Ingestão da Landing Zone para a camada Bronze
-# MAGIC
-# MAGIC Este script é idempotente: a cada execução ele reprocessa somente os arquivos
-# MAGIC elegíveis da Landing Zone, agrupa nomes ignorando o ano, grava tabelas Delta
-# MAGIC na camada Bronze e atualiza o dicionário de dados consolidado.
+"""Ingestão da Landing Zone para a camada Bronze.
+
+Este arquivo é um Python file puro para o Databricks. Ele não contém o marcador
+`# Databricks notebook source` nem comandos `# MAGIC`, evitando que o Git folder
+o apresente como notebook ou fragmente o conteúdo em células. O script é
+idempotente: a cada execução ele reprocessa somente os arquivos elegíveis da
+Landing Zone, agrupa nomes ignorando o ano, grava tabelas Delta na camada Bronze
+e atualiza o dicionário de dados consolidado.
+"""
 
 from __future__ import annotations
 
