@@ -44,7 +44,7 @@ except ImportError as exc:  # pragma: no cover - mensagem operacional
     ) from exc
 
 
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.0.2"
 DEFAULT_OUTPUT_DIR = "/Volumes/handson_beta/landing_zone/arquivos/"
 DEFAULT_IBGE_PAGE_URL = (
     "https://www.ibge.gov.br/estatisticas/sociais/populacao/"
@@ -710,6 +710,86 @@ class Downloader:
         return path
 
 
+def is_interactive_kernel() -> bool:
+    """Detecta o launcher interativo que injeta argumentos técnicos.
+
+    O Databricks pode iniciar o processo por ``db_ipykernel_launcher.py`` e
+    acrescentar ``-f <connection.json>`` ao ``sys.argv``. Essa detecção é usada
+    somente para remover esse argumento técnico; o parser continua estrito em
+    execução normal por terminal, Job ou CI/CD.
+    """
+
+    launcher = Path(sys.argv[0]).name.lower() if sys.argv else ""
+    return (
+        "ipykernel" in launcher
+        or "ipykernel" in sys.modules
+        or bool(os.getenv("DATABRICKS_NOTEBOOK_ID"))
+    )
+
+
+def is_databricks_connection_file(value: str) -> bool:
+    """Identifica o caminho técnico de conexão usado pelo Databricks.
+
+    O launcher observado em clusters Databricks usa caminhos como
+    ``/local_disk0/sandboxapi/<id>/connection.json``. A verificação é
+    intencionalmente específica para não transformar qualquer ``-f`` em uma
+    opção silenciosamente aceita pela CLI.
+    """
+
+    normalized = str(value).replace("\\\\", "/").lower()
+    return normalized.endswith("/connection.json") and (
+        normalized.startswith("/local_disk0/") or "/sandboxapi/" in normalized
+    )
+
+
+def sanitize_interactive_args(
+    argv: Sequence[str], *, interactive: bool | None = None
+) -> list[str]:
+    """Remove argumentos técnicos do kernel sem ignorar erros reais.
+
+    Não usa ``parse_known_args`` de propósito: argumentos desconhecidos devem
+    continuar gerando erro. O par ``-f <valor>`` é removido quando o processo
+    é interativo ou quando o valor tem o padrão específico de conexão do
+    Databricks. Em execução normal, ``-f`` com qualquer outro valor continua
+    sendo rejeitado pelo ``argparse``.
+    """
+
+    if interactive is None:
+        interactive = is_interactive_kernel()
+
+    sanitized: list[str] = []
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument in {"-f", "--connection-file"}:
+            next_value = argv[index + 1] if index + 1 < len(argv) else ""
+            is_kernel_argument = bool(interactive) or is_databricks_connection_file(
+                next_value
+            )
+            if is_kernel_argument:
+                # O valor seguinte é o caminho do arquivo de conexão do kernel.
+                index += 2 if index + 1 < len(argv) else 1
+                continue
+        if argument.startswith("--connection-file="):
+            connection_value = argument.split("=", 1)[1]
+            if bool(interactive) or is_databricks_connection_file(connection_value):
+                index += 1
+                continue
+        sanitized.append(argument)
+        index += 1
+    return sanitized
+
+
+def parse_args(
+    argv: Sequence[str] | None = None, *, interactive: bool | None = None
+) -> argparse.Namespace:
+    """Lê argumentos de terminal ou do launcher interativo do Databricks."""
+
+    raw_args = sys.argv[1:] if argv is None else argv
+    cleaned_args = sanitize_interactive_args(raw_args, interactive=interactive)
+    return build_parser().parse_args(cleaned_args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Descobre e baixa arquivos públicos de ANEEL, ONS, IBGE e CCEE."
@@ -796,7 +876,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = parse_args(argv)
     if args.tentativas < 1:
         raise SystemExit("--tentativas deve ser maior ou igual a 1")
     if args.intervalo_segundos < 0 or args.jitter_segundos < 0:
