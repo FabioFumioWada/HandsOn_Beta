@@ -28,7 +28,10 @@ from pyspark.sql import types as T
 # Parâmetros do processo
 # -----------------------------------------------------------------------------
 LANDING_ZONE = "/Volumes/handson_beta/landing_zone/arquivos/"
-BRONZE_ROOT = "/Volumes/handson_beta/bronze/"
+# No Unity Catalog, um diretório dentro de Volume não pode ser registrado
+# como localização de uma tabela. As tabelas Bronze são, portanto, criadas
+# como tabelas gerenciadas no schema abaixo. A Landing Zone continua sendo lida
+# pelo caminho do Volume informado pelo projeto.
 BRONZE_SCHEMA = "handson_beta.bronze"
 DICTIONARY_TABLE = f"{BRONZE_SCHEMA}.dicionario_dados_bronze"
 AUDIT_TABLE = f"{BRONZE_SCHEMA}.controle_carga_bronze"
@@ -319,13 +322,18 @@ def add_duplicate_indices(df: DataFrame) -> DataFrame:
     )
 
 
-def write_delta_table(df: DataFrame, table_name: str, table_path: str) -> None:
-    """Registra a tabela Delta no catálogo Bronze e mantém seu caminho no Volume."""
+def write_delta_table(df: DataFrame, table_name: str) -> None:
+    """Grava uma tabela Delta gerenciada no schema Bronze do Unity Catalog.
+
+    Não usamos `.option("path", "/Volumes/...")` com `.saveAsTable(...)`.
+    O Unity Catalog não permite registrar uma tabela em um diretório de Volume;
+    Volumes são destinados ao acesso baseado em arquivos. O armazenamento físico
+    da tabela gerenciada é controlado pelo schema/catalog do Unity Catalog.
+    """
     (
         df.write.format("delta")
         .mode("overwrite")
         .option("overwriteSchema", "true")
-        .option("path", table_path)
         .saveAsTable(table_name)
     )
 
@@ -360,7 +368,6 @@ dictionary_output: List[Dict[str, Any]] = []
 
 for dataset_key, group_files in sorted(files_by_group.items()):
     table_name = f"{BRONZE_SCHEMA}.{sanitize_identifier(dataset_key)}"
-    table_path = f"{BRONZE_ROOT.rstrip('/')}/{sanitize_identifier(dataset_key)}"
     frames: List[DataFrame] = []
     source_names: List[str] = []
     try:
@@ -376,7 +383,7 @@ for dataset_key, group_files in sorted(files_by_group.items()):
             continue
         combined = reduce(lambda left, right: left.unionByName(right, allowMissingColumns=True), frames)
         bronze_df = add_duplicate_indices(combined)
-        write_delta_table(bronze_df, table_name, table_path)
+        write_delta_table(bronze_df, table_name)
         row_count = bronze_df.count()
 
         for field in bronze_df.schema.fields:
@@ -391,7 +398,7 @@ for dataset_key, group_files in sorted(files_by_group.items()):
                     "finalidade_descricao": description_for(dataset_key, field.name, dictionary_lookup),
                     "origens": ", ".join(source_names),
                     "camada": "bronze",
-                    "caminho_tabela": table_path,
+                    "caminho_tabela": f"catalog_table://{table_name}",
                     "data_atualizacao_utc": RUN_TS,
                 }
             )
@@ -438,11 +445,7 @@ if dictionary_output:
         ]
     )
     dictionary_df = spark.createDataFrame(dictionary_output, schema=dictionary_schema)
-    write_delta_table(
-        dictionary_df,
-        DICTIONARY_TABLE,
-        f"{BRONZE_ROOT.rstrip('/')}/dicionario_dados_bronze",
-    )
+    write_delta_table(dictionary_df, DICTIONARY_TABLE)
 
 if run_summary:
     audit_schema = T.StructType(
@@ -458,7 +461,7 @@ if run_summary:
         ]
     )
     audit_df = spark.createDataFrame(run_summary, schema=audit_schema)
-    write_delta_table(audit_df, AUDIT_TABLE, f"{BRONZE_ROOT.rstrip('/')}/controle_carga_bronze")
+    write_delta_table(audit_df, AUDIT_TABLE)
 
-# Exibe resumo no notebook e facilita validação da execução.
-display(spark.createDataFrame(run_summary))
+# Exibe resumo no log da Python file task e também funciona em Jobs.
+spark.createDataFrame(run_summary).show(truncate=False)
