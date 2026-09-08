@@ -156,7 +156,12 @@ def list_source_files(path: str) -> List[Dict[str, Any]]:
 
 
 def select_canonical_files(source_files: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Escolhe um formato por dataset/ano e retorna selecionados e alternativas."""
+    """Escolhe exatamente um formato por dataset/ano, sem depender do ambiente Excel.
+
+    A ONS publica, para o mesmo dataset/ano, cópias CSV e XLSX. O CSV deve ser
+    sempre preferido quando existir, pois a leitura Spark não exige openpyxl.
+    XLS/XLSX só pode ser escolhido quando não houver CSV ou Parquet equivalente.
+    """
     eligible = [item for item in source_files if item["elegivel_importacao"]]
     grouped: DefaultDict[Tuple[str, Optional[int]], List[Dict[str, Any]]] = defaultdict(list)
     for item in eligible:
@@ -164,13 +169,22 @@ def select_canonical_files(source_files: Sequence[Dict[str, Any]]) -> Tuple[List
 
     selected: List[Dict[str, Any]] = []
     alternatives: List[Dict[str, Any]] = []
+    preferred_extensions = (".parquet", ".csv", ".xlsx", ".xls")
     for key in sorted(grouped, key=lambda value: (value[0], value[1] or 0)):
-        group = sorted(
-            grouped[key],
-            key=lambda item: (FORMAT_PRIORITY.get(item["extensao"], 99), item["caminho_origem"]),
-        )
-        selected.append(group[0])
-        alternatives.extend(group[1:])
+        group = grouped[key]
+        chosen: Optional[Dict[str, Any]] = None
+        for extension in preferred_extensions:
+            candidates = sorted(
+                [item for item in group if item["extensao"] == extension],
+                key=lambda item: item["caminho_origem"].lower(),
+            )
+            if candidates:
+                chosen = candidates[0]
+                break
+        if chosen is None:
+            continue
+        selected.append(chosen)
+        alternatives.extend(item for item in group if item["caminho_origem"] != chosen["caminho_origem"])
     return selected, alternatives
 
 
@@ -192,7 +206,8 @@ def read_csv(path: str) -> DataFrame:
     return (
         spark.read.format("csv")
         .option("header", "true")
-        .option("inferSchema", "true")
+        .option("inferSchema", "false")
+        .option("nullValue", "")
         .option("multiLine", "true")
         .option("quote", '"')
         .option("escape", '"')
@@ -205,6 +220,11 @@ def read_csv(path: str) -> DataFrame:
 
 def read_parquet(path: str) -> DataFrame:
     return spark.read.format("parquet").load(path)
+
+
+def as_string_columns(df: DataFrame) -> DataFrame:
+    """Uniformiza CSV, Parquet e Excel para evitar coerção implícita no union."""
+    return df.select(*[F.col(column).cast("string").alias(column) for column in df.columns])
 
 
 def read_excel(path: str) -> List[Tuple[str, DataFrame]]:
@@ -338,6 +358,10 @@ if not source_files:
     )
 
 selected_files, alternative_files = select_canonical_files(source_files)
+selected_format_counts: Dict[str, int] = defaultdict(int)
+for selected_file in selected_files:
+    selected_format_counts[selected_file["extensao"]] += 1
+print(f"Formatos canônicos ONS selecionados: {dict(sorted(selected_format_counts.items()))}")
 control_rows: List[Dict[str, Any]] = []
 
 file_list_schema = T.StructType(
@@ -438,12 +462,14 @@ for dataset_name, group_files in sorted(files_by_dataset.items()):
         for file_info in group_files:
             extension = file_info["extensao"]
             if extension == ".csv":
-                frames.append(add_source_metadata(read_csv(file_info["caminho_origem"]), file_info, None))
+                raw_df = read_csv(file_info["caminho_origem"])
+                frames.append(add_source_metadata(as_string_columns(raw_df), file_info, None))
             elif extension == ".parquet":
-                frames.append(add_source_metadata(read_parquet(file_info["caminho_origem"]), file_info, None))
+                raw_df = read_parquet(file_info["caminho_origem"])
+                frames.append(add_source_metadata(as_string_columns(raw_df), file_info, None))
             else:
                 for sheet_name, sheet_df in read_excel(file_info["caminho_origem"]):
-                    frames.append(add_source_metadata(sheet_df, file_info, sheet_name))
+                    frames.append(add_source_metadata(as_string_columns(sheet_df), file_info, sheet_name))
 
         if not frames:
             raise RuntimeError("Nenhum DataFrame foi produzido para o dataset ONS.")
